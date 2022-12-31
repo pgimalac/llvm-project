@@ -3320,6 +3320,11 @@ void ExprEngine::evalLoad(ExplodedNodeSet &Dst,
       if (LoadTy.isNull())
         LoadTy = BoundEx->getType();
       V = state->getSVal(location.castAs<Loc>(), LoadTy);
+      // if you can't find the sval stored in the memory
+      // then just use a symbolic value
+      if (V.isUnknown()) {
+        V = location;
+      }
     }
 
     Bldr.generateNode(NodeEx, I, state->BindExpr(BoundEx, LCtx, V), tag,
