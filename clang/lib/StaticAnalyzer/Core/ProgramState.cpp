@@ -110,13 +110,70 @@ ProgramStateRef ProgramStateManager::removeDeadBindingsFromEnvironmentAndStore(
   return getPersistentState(NewState);
 }
 
+class StoreLocFilterer: public StoreManager::BindingsHandler {
+  StoreRef store;
+
+public:
+  StoreLocFilterer(Store store, StoreManager &SMgr): store(StoreRef(store, SMgr)) {}
+  bool HandleBinding(StoreManager& SMgr, Store store,
+                               const MemRegion *region, SVal val) {
+    if (val.getAs<Loc>().hasValue()) {
+      llvm::errs() << "found a Loc in the store " << region->getKind() << "\n";
+      region->dump();
+      llvm::errs()<< '\n';
+      this->store = SMgr.killBinding(store, loc::MemRegionVal(region));
+    }
+    return true;
+  }
+
+  StoreRef getStore() {
+    return store;
+  }
+};
+
 ProgramStateRef ProgramState::bindLoc(Loc LV,
                                       SVal V,
                                       const LocationContext *LCtx,
                                       bool notifyChanges) const {
   ProgramStateManager &Mgr = getStateManager();
-  ProgramStateRef newState = makeWithStore(Mgr.StoreMgr->Bind(getStore(),
-                                                             LV, V));
+
+  ProgramStateRef newState = this;
+  Optional<loc::MemRegionVal> memRegVal;
+  bool isPtrLoc = !(memRegVal = LV.getAs<loc::MemRegionVal>()) || memRegVal->getRegion()->getAs<ElementRegion>() != nullptr;
+  if (isPtrLoc) {
+    llvm::errs() << "Before removing:\n";
+    this->dump();
+    llvm::errs() << "\n";
+
+    // if LV is a pointer or array
+    // delete ElementRegion in the store and the environment
+
+    StoreManager &SMgr = Mgr.getStoreManager();
+    StoreLocFilterer handler(this->getStore(), SMgr);
+    SMgr.iterBindings(this->getStore(), handler);
+    StoreRef newStore = handler.getStore();
+
+    Environment env = this->getEnvironment();
+    for (auto e : this->getEnvironment()) {
+      auto key = e.first;
+      auto value = e.second;
+      bool isElement = value.getAs<Loc>().hasValue();
+      if (isElement) {
+        env = newState->getStateManager().EnvMgr.bindExpr(env, key,
+                                                          UnknownVal(), true);
+        llvm::errs() << "found a Loc in the environment\n";
+      }
+    }
+
+    ProgramState st = ProgramState(&Mgr, env, newStore, GDM);
+    newState = getStateManager().getPersistentState(st);
+
+    llvm::errs() << "After removing:\n";
+    newState->dump();
+    llvm::errs() << "\n\n";
+  }
+
+  newState = newState->makeWithStore(Mgr.StoreMgr->Bind(getStore(), LV, V));
   const MemRegion *MR = LV.getAsRegion();
   if (MR && notifyChanges)
     return Mgr.getOwningEngine().processRegionChange(newState, MR, LCtx);
